@@ -22,25 +22,47 @@
 typedef struct {
     tool_t tool;
     float  box[4][4];
-
-    struct {
-        gesture3d_t drag;
-        gesture3d_t hover;
-    } gestures;
-
 } tool_laser_t;
 
-static int on_drag(gesture3d_t *gest, void *user)
-{
-    tool_laser_t *laser = (tool_laser_t*)USER_GET(user, 0);
-    painter_t painter = *(painter_t*)USER_GET(user, 1);
 
+static int on_hover(gesture3d_t *gest)
+{
+    tool_laser_t *laser = USER_GET(gest->user, 0);
+    float v[4];
+    float view_mat_inv[4][4] = {};
+    camera_t *camera = goxel.image->active_camera;
+
+    // Create the tool box from the camera along the visible ray.
+    mat4_set_identity(laser->box);
+    mat4_invert(camera->view_mat, view_mat_inv);
+    mat4_mul_vec4(view_mat_inv, VEC(1, 0, 0, 0), v);
+    vec3_copy(v, laser->box[0]);
+    mat4_mul_vec4(view_mat_inv, VEC(0, 1, 0, 0), v);
+    vec3_copy(v, laser->box[1]);
+    mat4_mul_vec4(view_mat_inv, VEC(0, 0, 1, 0), v);
+    vec3_copy(v, laser->box[2]);
+    vec3_neg(gest->normal, laser->box[2]);
+    vec3_copy(gest->pos, laser->box[3]);
+    // Just a large value for the size of the laser box.
+    mat4_itranslate(laser->box, 0, 0, -1024);
+    mat4_iscale(laser->box, goxel.tool_radius, goxel.tool_radius, 1024);
+    render_box(&goxel.rend, laser->box, NULL, EFFECT_WIREFRAME);
+    return 0;
+}
+
+
+static int on_drag(gesture3d_t *gest)
+{
+    tool_laser_t *laser = (tool_laser_t*)USER_GET(gest->user, 0);
+    painter_t painter = *(painter_t*)USER_GET(gest->user, 1);
     volume_t *volume = goxel.image->active_layer->volume;
+
+    on_hover(gest);
     painter.mode = MODE_SUB_CLAMP;
     painter.shape = &shape_cylinder;
     vec4_set(painter.color, 255, 255, 255, 255);
 
-    if (gest->state == GESTURE_BEGIN)
+    if (gest->state == GESTURE3D_STATE_BEGIN)
         image_history_push(goxel.image);
 
     volume_op(volume, &painter, laser->box);
@@ -51,39 +73,20 @@ static int iter(tool_t *tool, const painter_t *painter,
                 const float viewport[4])
 {
     tool_laser_t *laser = (tool_laser_t*)tool;
-    cursor_t *curs = &goxel.cursor;
-    curs->snap_mask = SNAP_CAMERA;
-    curs->snap_offset = 0;
-    float v[4];
-    float view_mat_inv[4][4] = {};
-    camera_t *camera = goxel.image->active_camera;
 
-    if (!laser->gestures.drag.type) {
-        laser->gestures.drag = (gesture3d_t) {
-            .type = GESTURE_DRAG,
-            .callback = on_drag,
-        };
-    }
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_HOVER,
+        .callback = on_hover,
+        .snap_mask = SNAP_CAMERA,
+        .user = USER_PASS(laser, painter),
+    });
 
-    if (curs->snaped & SNAP_CAMERA) {
-        // Create the tool box from the camera along the visible ray.
-        mat4_set_identity(laser->box);
-        mat4_invert(camera->view_mat, view_mat_inv);
-        mat4_mul_vec4(view_mat_inv, VEC(1, 0, 0, 0), v);
-        vec3_copy(v, laser->box[0]);
-        mat4_mul_vec4(view_mat_inv, VEC(0, 1, 0, 0), v);
-        vec3_copy(v, laser->box[1]);
-        mat4_mul_vec4(view_mat_inv, VEC(0, 0, 1, 0), v);
-        vec3_copy(v, laser->box[2]);
-        vec3_neg(curs->normal, laser->box[2]);
-        vec3_copy(curs->pos, laser->box[3]);
-        // Just a large value for the size of the laser box.
-        mat4_itranslate(laser->box, 0, 0, -1024);
-        mat4_iscale(laser->box, goxel.tool_radius, goxel.tool_radius, 1024);
-        render_box(&goxel.rend, laser->box, NULL, EFFECT_WIREFRAME);
-    }
-
-    gesture3d(&laser->gestures.drag, curs, USER_PASS(laser, painter));
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_DRAG,
+        .callback = on_drag,
+        .snap_mask = SNAP_CAMERA,
+        .user = USER_PASS(laser, painter),
+    });
 
     return tool->state;
 }

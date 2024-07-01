@@ -29,83 +29,47 @@ typedef struct {
     tool_t  tool;
 
     int     snap_face;
-    float   start_pos[3];
-
-    struct {
-        gesture3d_t hover;
-        gesture3d_t drag;
-    } gestures;
-
+    float   start_rect[4][4];
 } tool_selection_t;
 
-static void get_box(const float p0[3], const float p1[3], const float n[3],
-                     float r, const float plane[4][4], float out[4][4])
+static void get_rect(const float pos[3], const float normal[3],
+                     float out[4][4])
 {
-    float rot[4][4], box[4][4];
-    float v[3];
-    if (p1 == NULL) {
-        bbox_from_extents(box, p0, r, r, r);
-        box_swap_axis(box, 2, 0, 1, box);
-        mat4_copy(box, out);
-        return;
-    }
-    if (r == 0) {
-        bbox_from_points(box, p0, p1);
-        bbox_grow(box, 0.5, 0.5, 0.5, box);
-        // Apply the plane rotation.
-        mat4_copy(plane, rot);
-        vec4_set(rot[3], 0, 0, 0, 1);
-        mat4_imul(box, rot);
-        mat4_copy(box, out);
-        return;
-    }
-
-    // Create a box for a line:
-    int i;
-    const float AXES[][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-
-    mat4_set_identity(box);
-    vec3_mix(p0, p1, 0.5, box[3]);
-    vec3_sub(p1, box[3], box[2]);
-    for (i = 0; i < 3; i++) {
-        vec3_cross(box[2], AXES[i], box[0]);
-        if (vec3_norm2(box[0]) > 0) break;
-    }
-    if (i == 3) {
-        mat4_copy(box, out);
-        return;
-    }
-    vec3_normalize(box[0], v);
-    vec3_mul(v, r, box[0]);
-    vec3_cross(box[2], box[0], v);
-    vec3_normalize(v, v);
-    vec3_mul(v, r, box[1]);
-    mat4_copy(box, out);
+    plane_from_normal(out, pos, normal);
+    mat4_iscale(out, 0.5, 0.5, 0);
 }
 
-static int on_hover(gesture3d_t *gest, void *user)
+static int on_hover(gesture3d_t *gest)
 {
-    float box[4][4];
-    cursor_t *curs = gest->cursor;
-    uint8_t box_color[4] = {255, 255, 0, 255};
+    float rect[4][4];
+    uint8_t rect_color[4] = {255, 255, 0, 255};
 
     goxel_set_help_text("Click and drag to set selection.");
-    get_box(curs->pos, curs->pos, curs->normal, 0, goxel.plane, box);
-    render_box(&goxel.rend, box, box_color, EFFECT_WIREFRAME);
+    get_rect(gest->pos, gest->normal, rect);
+    render_box(&goxel.rend, rect, rect_color, EFFECT_WIREFRAME);
     return 0;
 }
 
-static int on_drag(gesture3d_t *gest, void *user)
+static int on_drag(gesture3d_t *gest)
 {
-    tool_selection_t *tool = user;
-    cursor_t *curs = gest->cursor;
+    tool_selection_t *tool = gest->user;
+    float rect[4][4];
+    float p[3];
+    int dir;
 
-    if (gest->state == GESTURE_BEGIN)
-        vec3_copy(curs->pos, tool->start_pos);
-    curs->snap_mask &= ~(SNAP_SELECTION_IN | SNAP_SELECTION_OUT);
     goxel_set_help_text("Drag.");
-    get_box(tool->start_pos, curs->pos, curs->normal,
-            0, goxel.plane, goxel.selection);
+
+    get_rect(gest->pos, gest->normal, rect);
+    if (gest->state == GESTURE3D_STATE_BEGIN)
+        mat4_copy(rect, tool->start_rect);
+
+    box_union(tool->start_rect, rect, goxel.selection);
+    // If the selection is flat, we grow it one voxel.
+    if (box_get_volume(goxel.selection) == 0) {
+        dir = gest->snaped == SNAP_VOLUME ? -1 : 1;
+        vec3_addk(gest->pos, gest->normal, dir, p);
+        bbox_extends_from_points(goxel.selection, 1, &p, goxel.selection);
+    }
     return 0;
 }
 
@@ -114,34 +78,33 @@ static int iter(tool_t *tool, const painter_t *painter,
                 const float viewport[4])
 {
     float transf[4][4];
-
     tool_selection_t *selection = (tool_selection_t*)tool;
-    cursor_t *curs = &goxel.cursor;
-    curs->snap_mask |= SNAP_ROUNDED;
-    curs->snap_mask &= ~(SNAP_SELECTION_IN | SNAP_SELECTION_OUT);
-    curs->snap_offset = 0.5;
-    curs->snap_mask |= SNAP_SELECTION_OUT;
+    int snap_mask = goxel.snap_mask;
 
-    if (!selection->gestures.drag.type) {
-        selection->gestures.hover = (gesture3d_t) {
-            .type = GESTURE_HOVER,
-            .callback = on_hover,
-        };
-        selection->gestures.drag = (gesture3d_t) {
-            .type = GESTURE_DRAG,
-            .callback = on_drag,
-        };
-    }
-    if (box_edit(SNAP_SELECTION_OUT, g_drag_mode == DRAG_RESIZE ? 1 : 0,
+    // To cleanup.
+    snap_mask |= SNAP_ROUNDED;
+    snap_mask &= ~(SNAP_SELECTION_IN | SNAP_SELECTION_OUT);
+
+    if (box_edit(goxel.selection, g_drag_mode == DRAG_RESIZE ? 1 : 0,
                  transf, NULL)) {
         mat4_mul(transf, goxel.selection, goxel.selection);
         return 0;
     }
 
-    if (gesture3d(&selection->gestures.drag, curs, selection)) goto end;
-    if (gesture3d(&selection->gestures.hover, curs, selection)) goto end;
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_HOVER,
+        .snap_mask = snap_mask,
+        .callback = on_hover,
+        .user = selection,
+    });
 
-end:
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_DRAG,
+        .snap_mask = snap_mask & ~(SNAP_SELECTION_IN | SNAP_SELECTION_OUT),
+        .callback = on_drag,
+        .user = selection,
+    });
+
     return tool->state;
 }
 
@@ -167,7 +130,6 @@ static int gui(tool_t *tool)
         return 0;
     }
     gui_action_button(ACTION_fill_selection, "Fill", 1.0);
-    gui_action_button(ACTION_layer_clear, "Clear", 1.0);
     gui_row_begin(2);
     gui_action_button(ACTION_add_selection, "Add", 0.5);
     gui_action_button(ACTION_sub_selection, "Sub", 1.0);

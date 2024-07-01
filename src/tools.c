@@ -48,31 +48,24 @@ const tool_t *tool_get(int id)
     return g_tools[id];
 }
 
-static int pick_color_gesture(gesture3d_t *gest, void *user)
+static int pick_color_gesture(gesture3d_t *gest)
 {
-    cursor_t *curs = &goxel.cursor;
     const volume_t *volume = goxel_get_layers_volume(goxel.image);
-    int pi[3] = {floor(curs->pos[0]),
-                 floor(curs->pos[1]),
-                 floor(curs->pos[2])};
+    int pi[3] = {floor(gest->pos[0]),
+                 floor(gest->pos[1]),
+                 floor(gest->pos[2])};
     uint8_t color[4];
-    curs->snap_mask = SNAP_VOLUME;
-    curs->snap_offset = -0.5;
 
     goxel_set_help_text("Click on a voxel to pick the color");
-    if (!curs->snaped) return 0;
+    if (!gest->snaped) return 0;
     volume_get_at(volume, NULL, pi, color);
     color[3] = 255;
     goxel_set_help_text("pick: %d %d %d", color[0], color[1], color[2]);
-    if (curs->flags & CURSOR_PRESSED) vec4_copy(color, goxel.painter.color);
+    if (gest->flags & GESTURE3D_FLAG_PRESSED) {
+        vec4_copy(color, goxel.painter.color);
+    }
     return 0;
 }
-
-static gesture3d_t g_pick_color_gesture = {
-    .type = GESTURE_HOVER,
-    .callback = pick_color_gesture,
-    .buttons = CURSOR_CTRL,
-};
 
 int tool_iter(tool_t *tool, const painter_t *painter, const float viewport[4])
 {
@@ -84,8 +77,16 @@ int tool_iter(tool_t *tool, const painter_t *painter, const float viewport[4])
     }
     tool->state = tool->iter_fn(tool, painter, viewport);
 
-    if (tool->flags & TOOL_ALLOW_PICK_COLOR)
-        gesture3d(&g_pick_color_gesture, &goxel.cursor, NULL);
+    if (tool->flags & TOOL_ALLOW_PICK_COLOR) {
+        goxel_gesture3d(&(gesture3d_t) {
+            .type = GESTURE3D_TYPE_HOVER,
+            .snap_mask = SNAP_VOLUME,
+            .snap_offset = -0.5,
+            .callback = pick_color_gesture,
+            .buttons = tool->id == TOOL_PICK_COLOR ?
+                        0 : GESTURE3D_FLAG_CTRL,
+        });
+    }
 
     return tool->state;
 }

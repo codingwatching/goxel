@@ -9,9 +9,6 @@
 typedef struct {
     tool_t tool;
     float rect[4];
-    struct {
-        gesture3d_t drag;
-    } gestures;
 } tool_rect_select_t;
 
 static void apply(const float rect_[4])
@@ -35,7 +32,7 @@ static void apply(const float rect_[4])
     if (goxel.mask_mode == MODE_SUB)
         memset(color, 0, sizeof(color));
 
-    if (goxel.mask_mode == MODE_REPLACE || goxel.mask_mode == 0)
+    if (goxel.mask_mode == MODE_REPLACE)
         volume_clear(goxel.mask);
 
     // XXX: very slow implementation!
@@ -55,23 +52,22 @@ static void apply(const float rect_[4])
     }
 }
 
-static int on_drag(gesture3d_t *gest, void *user)
+static int on_drag(gesture3d_t *gest)
 {
-    tool_rect_select_t *tool = user;
-    cursor_t *curs = gest->cursor;
+    tool_rect_select_t *tool = gest->user;
     float pos[4];
     const camera_t *cam = goxel.image->active_camera;
 
-    vec4_set(pos, curs->pos[0], curs->pos[1], curs->pos[2], 1.0);
+    vec4_set(pos, gest->pos[0], gest->pos[1], gest->pos[2], 1.0);
     mat4_mul_vec4(cam->view_mat, pos, pos);
     mat4_mul_vec4(cam->proj_mat, pos, pos);
     vec3_mul(pos, 1 / pos[3], pos);
 
-    if (gest->state == GESTURE_BEGIN)
+    if (gest->state == GESTURE3D_STATE_BEGIN)
         vec2_copy(pos, tool->rect);
     vec2_copy(pos, &tool->rect[2]);
 
-    if (gest->state == GESTURE_END) {
+    if (gest->state == GESTURE3D_STATE_END) {
         apply(tool->rect);
         vec4_set(tool->rect, 0, 0, 0, 0);
     }
@@ -84,16 +80,13 @@ static int iter(tool_t *tool_, const painter_t *painter,
 {
     float plane[4][4], w, h, center[2];
     tool_rect_select_t *tool = (tool_rect_select_t*)tool_;
-    cursor_t *curs = &goxel.cursor;
-    if (!tool->gestures.drag.type) {
-        tool->gestures.drag = (gesture3d_t) {
-            .type = GESTURE_DRAG,
-            .callback = on_drag,
-        };
-    }
 
-    curs->snap_mask = SNAP_CAMERA;
-    gesture3d(&tool->gestures.drag, curs, tool);
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_DRAG,
+        .snap_mask = SNAP_CAMERA,
+        .callback = on_drag,
+        .user = tool,
+    });
 
     if (    tool->rect[0] == 0 && tool->rect[1] == 0 &&
             tool->rect[2] == 0 && tool->rect[3] == 0) {
@@ -119,7 +112,6 @@ static int gui(tool_t *tool_)
 
     gui_group_begin(NULL);
     gui_action_button(ACTION_reset_selection, _(RESET), 1.0);
-    gui_action_button(ACTION_layer_clear, _(CLEAR), 1.0);
     gui_action_button(ACTION_fill_selection, _(FILL), 1.0);
     gui_action_button(ACTION_cut_as_new_layer, _(CUT_TO_NEW_LAYER), 1.0);
     gui_group_end();

@@ -24,9 +24,6 @@ typedef struct {
     volume_t *volume;
     int    snap_face;
     int    last_delta;
-    struct {
-        gesture3d_t drag;
-    } gestures;
 } tool_extrude_t;
 
 static int select_cond(void *user, const volume_t *volume,
@@ -70,25 +67,24 @@ static int get_face(const float n[3])
 // XXX: this code is just too ugly.  Needs a lot of cleanup.
 // The problem is that we should use some generic functions to handle
 // box resize, since we do it a lot, and the code is never very clear.
-static int on_drag(gesture3d_t *gest, void *user)
+static int on_drag(gesture3d_t *gest)
 {
-    tool_extrude_t *tool = (tool_extrude_t*)user;
+    tool_extrude_t *tool = (tool_extrude_t*)gest->user;
     volume_t *volume = goxel.image->active_layer->volume;
     volume_t *tmp_volume;
-    cursor_t *curs = gest->cursor;
     float face_plane[4][4];
     float n[3], pos[3], v[3], box[4][4];
     int pi[3];
     float delta;
 
-    if (gest->state == GESTURE_BEGIN) {
-        tool->snap_face = get_face(curs->normal);
+    if (gest->state == GESTURE3D_STATE_BEGIN) {
+        tool->snap_face = get_face(gest->normal);
 
         tmp_volume = volume_new();
         tool->volume = volume_copy(volume);
-        pi[0] = floor(curs->pos[0]);
-        pi[1] = floor(curs->pos[1]);
-        pi[2] = floor(curs->pos[2]);
+        pi[0] = floor(gest->pos[0]);
+        pi[1] = floor(gest->pos[1]);
+        pi[2] = floor(gest->pos[2]);
         volume_select(volume, pi, select_cond, &tool->snap_face, tmp_volume);
         volume_merge(tool->volume, tmp_volume, MODE_MULT_ALPHA, NULL);
         volume_delete(tmp_volume);
@@ -100,7 +96,8 @@ static int on_drag(gesture3d_t *gest, void *user)
         volume_get_box(tool->volume, true, box);
         mat4_mul(box, FACES_MATS[tool->snap_face], face_plane);
         vec3_normalize(face_plane[0], v);
-        plane_from_vectors(goxel.tool_plane, curs->pos, curs->normal, v);
+        gest->snap_mask = SNAP_SHAPE_PLANE;
+        plane_from_vectors(gest->snap_shape, gest->pos, gest->normal, v);
         tool->last_delta = 0;
     }
 
@@ -111,7 +108,7 @@ static int on_drag(gesture3d_t *gest, void *user)
     mat4_mul(box, FACES_MATS[tool->snap_face], face_plane);
     vec3_normalize(face_plane[2], n);
     // XXX: Is there a better way to compute the delta??
-    vec3_sub(curs->pos, goxel.tool_plane[3], v);
+    vec3_sub(gest->pos, gest->snap_shape[3], v);
     vec3_project(v, n, v);
     delta = vec3_dot(n, v);
     // render_box(&goxel.rend, &box, NULL, EFFECT_WIREFRAME);
@@ -120,9 +117,9 @@ static int on_drag(gesture3d_t *gest, void *user)
     if (round(delta) == tool->last_delta) goto end;
     tool->last_delta = round(delta);
 
-    vec3_sub(curs->pos, goxel.tool_plane[3], v);
+    vec3_sub(gest->pos, gest->snap_shape[3], v);
     vec3_project(v, n, v);
-    vec3_add(goxel.tool_plane[3], v, pos);
+    vec3_add(gest->snap_shape[3], v, pos);
     pos[0] = round(pos[0]);
     pos[1] = round(pos[1]);
     pos[2] = round(pos[2]);
@@ -146,9 +143,8 @@ static int on_drag(gesture3d_t *gest, void *user)
     volume_delete(tmp_volume);
 
 end:
-    if (gest->state == GESTURE_END) {
+    if (gest->state == GESTURE3D_STATE_END) {
         volume_delete(tool->volume);
-        mat4_copy(plane_null, goxel.tool_plane);
     }
     return 0;
 }
@@ -157,18 +153,14 @@ static int iter(tool_t *tool_, const painter_t *painter,
                 const float viewport[4])
 {
     tool_extrude_t *tool = (tool_extrude_t*)tool_;
-    cursor_t *curs = &goxel.cursor;
-    curs->snap_offset = -0.5;
-    curs->snap_mask &= ~SNAP_ROUNDED;
-
     if (!tool->volume_orig) tool->volume_orig = volume_new();
-    if (!tool->gestures.drag.type) {
-        tool->gestures.drag = (gesture3d_t) {
-            .type = GESTURE_DRAG,
-            .callback = on_drag,
-        };
-    }
-    gesture3d(&tool->gestures.drag, curs, tool);
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_DRAG,
+        .snap_mask = goxel.snap_mask & ~SNAP_ROUNDED, // Why?
+        .snap_offset = -0.5,
+        .callback = on_drag,
+        .user = tool,
+    });
     return 0;
 }
 

@@ -21,9 +21,6 @@
 typedef struct {
     tool_t tool;
     int threshold;
-    struct {
-        gesture3d_t click;
-    } gestures;
 } tool_fuzzy_select_t;
 
 static int select_cond(void *user, const volume_t *volume,
@@ -43,17 +40,16 @@ static int select_cond(void *user, const volume_t *volume,
     return d <= tool->threshold ? 255 : 0;
 }
 
-static int on_click(gesture3d_t *gest, void *user)
+static int on_click(gesture3d_t *gest)
 {
     volume_t *volume = goxel.image->active_layer->volume;
     volume_t *sel;
     int pi[3];
-    cursor_t *curs = gest->cursor;
-    tool_fuzzy_select_t *tool = (void*)user;
+    tool_fuzzy_select_t *tool = gest->user;
 
-    pi[0] = floor(curs->pos[0]);
-    pi[1] = floor(curs->pos[1]);
-    pi[2] = floor(curs->pos[2]);
+    pi[0] = floor(gest->pos[0]);
+    pi[1] = floor(gest->pos[1]);
+    pi[2] = floor(gest->pos[2]);
     sel = volume_new();
     volume_select(volume, pi, select_cond, tool, sel);
     if (goxel.mask == NULL) goxel.mask = volume_new();
@@ -66,19 +62,14 @@ static int on_click(gesture3d_t *gest, void *user)
 static int iter(tool_t *tool_, const painter_t *painter,
                 const float viewport[4])
 {
-    cursor_t *curs = &goxel.cursor;
     tool_fuzzy_select_t *tool = (void*)tool_;
-
-    curs->snap_offset = -0.5;
-    curs->snap_mask &= ~SNAP_ROUNDED;
-
-    if (!tool->gestures.click.type) {
-        tool->gestures.click = (gesture3d_t) {
-            .type = GESTURE_CLICK,
-            .callback = on_click,
-        };
-    }
-    gesture3d(&tool->gestures.click, curs, tool);
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_CLICK,
+        .snap_mask = SNAP_VOLUME | SNAP_IMAGE_BOX,
+        .snap_offset = -0.5,
+        .callback = on_click,
+        .user = tool,
+    });
     return 0;
 }
 

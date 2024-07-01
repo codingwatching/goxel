@@ -152,12 +152,24 @@ static bool goxel_unproject_on_box(
     return false;
 }
 
-static bool goxel_unproject_on_volume(
-        const float view[4], const float pos[2], const volume_t *volume,
-        float out[3], float normal[3])
+static void update_pick_fbo(const int view_size[2], const volume_t *volume)
 {
-    int view_size[2] = {view[2], view[3]};
-    // XXX: No need to render the fbo if it is not dirty.
+    // TODO: use a cache to avoid calling this twice in the same frame.
+
+    renderer_t rend = {.settings = goxel.rend.settings};
+    uint8_t clear_color[4] = {0, 0, 0, 0};
+    float rect[4] = {0, 0, view_size[0], view_size[1]};
+
+    typedef struct {
+        uint64_t volume_key;
+        render_settings_t rend_settings;
+        float view_mat[4][4];
+        float proj_mat[4][4];
+    } key_t;
+
+    key_t key = {0};
+    static key_t cache_key = {0};
+
     if (goxel.pick_fbo && (goxel.pick_fbo->w != view_size[0] ||
                            goxel.pick_fbo->h != view_size[1])) {
         texture_delete(goxel.pick_fbo);
@@ -167,24 +179,60 @@ static bool goxel_unproject_on_volume(
     if (!goxel.pick_fbo) {
         goxel.pick_fbo = texture_new_buffer(
                 view_size[0], view_size[1], TF_DEPTH);
+        cache_key = (key_t){0};
     }
 
-    renderer_t rend = {.settings = goxel.rend.settings};
+    key = (key_t) {
+        .volume_key = volume_get_key(volume),
+        .rend_settings = goxel.rend.settings,
+        .view_mat = MAT4_COPY(goxel.rend.view_mat),
+        .proj_mat = MAT4_COPY(goxel.rend.proj_mat),
+    };
+
+    if (memcmp(&key, &cache_key, sizeof(key_t)) == 0) {
+        GL(glBindFramebuffer(GL_FRAMEBUFFER, goxel.pick_fbo->framebuffer));
+        return;
+    }
+    memcpy(&cache_key, &key, sizeof(key_t));
+
     mat4_copy(goxel.rend.view_mat, rend.view_mat);
     mat4_copy(goxel.rend.proj_mat, rend.proj_mat);
-
-    uint32_t pixel;
-    int voxel_pos[3];
-    int face, tile_id, tile_pos[3];
-    int x, y;
-    float rect[4] = {0, 0, view_size[0], view_size[1]};
-    uint8_t clear_color[4] = {0, 0, 0, 0};
 
     rend.settings.shadow = 0;
     rend.fbo = goxel.pick_fbo->framebuffer;
     rend.scale = 1;
     render_volume(&rend, volume, NULL, EFFECT_RENDER_POS);
     render_submit(&rend, rect, clear_color);
+}
+
+static void volume_get_tile_pos(const volume_t *volume, int id, int pos[3])
+{
+    int tile_id, tile_pos[3];
+    volume_iterator_t iter;
+    tile_id = 1;
+    iter = volume_get_iterator(volume,
+            VOLUME_ITER_TILES | VOLUME_ITER_INCLUDES_NEIGHBORS);
+    while (volume_iter(&iter, tile_pos)) {
+        if (tile_id == id) {
+            memcpy(pos, tile_pos, sizeof(tile_pos));
+            return;
+        }
+        tile_id++;
+    }
+}
+
+static bool goxel_unproject_on_volume(
+        const float view[4], const float pos[2], const volume_t *volume,
+        float out[3], float normal[3])
+{
+    int view_size[2] = {view[2], view[3]};
+
+    uint32_t pixel;
+    int voxel_pos[3];
+    int face, tile_id, tile_pos[3] = {};
+    int x, y;
+
+    update_pick_fbo(view_size, volume);
 
     x = round(pos[0] - view[0]);
     y = round(pos[1] - view[1]);
@@ -195,7 +243,7 @@ static bool goxel_unproject_on_volume(
 
     unpack_pos_data(pixel, voxel_pos, &face, &tile_id);
     if (!tile_id) return false;
-    render_get_tile_pos(&rend, volume, tile_id, tile_pos);
+    volume_get_tile_pos(volume, tile_id, tile_pos);
     out[0] = tile_pos[0] + voxel_pos[0] + 0.5;
     out[1] = tile_pos[1] + voxel_pos[1] + 0.5;
     out[2] = tile_pos[2] + voxel_pos[2] + 0.5;
@@ -208,32 +256,30 @@ static bool goxel_unproject_on_volume(
 
 
 int goxel_unproject(const float viewport[4],
-                    const float pos[2], int snap_mask, float offset,
+                    const float pos[2], int snap_mask,
+                    const float snap_shape[4][4], float offset,
                     float out[3], float normal[3])
 {
     int i, ret = 0;
     bool r = false;
     float dist, best = INFINITY;
-    float v[3], p[3] = {}, n[3] = {}, box[4][4];
+    float v[3], p[3] = {}, n[3] = {};
     camera_t *cam = get_camera();
 
-    // If tool_plane is set, we specifically use it.
-    if (!plane_is_null(goxel.tool_plane)) {
-        r = goxel_unproject_on_plane(viewport, pos,
-                                     goxel.tool_plane, out, normal);
-        ret = r ? SNAP_PLANE : 0;
-        goto end;
-    }
-
-    for (i = 0; i < 7; i++) {
+    for (i = 0; i < 8; i++) {
         if (!(snap_mask & (1 << i))) continue;
         if ((1 << i) == SNAP_VOLUME) {
             r = goxel_unproject_on_volume(viewport, pos,
                             goxel_get_layers_volume(goxel.image), p, n);
         }
-        if ((1 << i) == SNAP_PLANE)
-            r = goxel_unproject_on_plane(viewport, pos,
-                                         goxel.plane, p, n);
+        if ((1 << i) == SNAP_PLANE) {
+            r = goxel_unproject_on_plane(
+                    viewport, pos, goxel.plane, p, n);
+        }
+        if ((1 << i) == SNAP_SHAPE_PLANE) {
+            r = goxel_unproject_on_plane(
+                    viewport, pos, snap_shape, p, n);
+        }
         if ((1 << i) == SNAP_SELECTION_IN)
             r = goxel_unproject_on_box(viewport, pos,
                                        goxel.selection, true,
@@ -242,15 +288,10 @@ int goxel_unproject(const float viewport[4],
             r = goxel_unproject_on_box(viewport, pos,
                                        goxel.selection, false,
                                        p, n, NULL);
-        if ((1 << i) == SNAP_LAYER_OUT) {
-            volume_get_box(goxel.image->active_layer->volume, true, box);
-            r = goxel_unproject_on_box(viewport, pos, box, false,
+        if ((1 << i) == SNAP_SHAPE_BOX) {
+            r = goxel_unproject_on_box(viewport, pos, snap_shape, false,
                                        p, n, NULL);
         }
-        if ((1 << i) == SNAP_IMAGE_BOX)
-            r = goxel_unproject_on_box(viewport, pos,
-                                       goxel.image->box, true,
-                                       p, n, NULL);
         if ((1 << i) == SNAP_IMAGE_BOX)
             r = goxel_unproject_on_box(viewport, pos,
                                        goxel.image->box, true,
@@ -272,14 +313,19 @@ int goxel_unproject(const float viewport[4],
         ret = 1 << i;
         best = dist;
     }
-end:
+
+    // Post effects.
+    // Note: should probably move outside of this function.
     if (ret && offset)
         vec3_iaddk(out, normal, offset);
     if (ret && (snap_mask & SNAP_ROUNDED)) {
-        out[0] = round(out[0] - 0.5) + 0.5;
-        out[1] = round(out[1] - 0.5) + 0.5;
-        out[2] = round(out[2] - 0.5) + 0.5;
+        for (i = 0; i < 3; i++) {
+            if (normal[i] == 0) {
+                out[i] = round(out[i] - 0.5) + 0.5;
+            }
+        }
     }
+
     return ret;
 }
 
@@ -357,13 +403,13 @@ void goxel_init(void)
     }
     goxel.palette = goxel.palette ?: goxel.palettes;
 
+    goxel_add_gesture(GESTURE_HOVER, 0, on_hover);
     goxel_add_gesture(GESTURE_DRAG, GESTURE_LMB, on_drag_rotate);
     goxel_add_gesture(GESTURE_DRAG, GESTURE_LMB, on_drag);
     goxel_add_gesture(GESTURE_DRAG, GESTURE_RMB, on_pan);
     goxel_add_gesture(GESTURE_DRAG, GESTURE_MMB | GESTURE_SHIFT, on_pan);
     goxel_add_gesture(GESTURE_DRAG, GESTURE_MMB | GESTURE_CTRL, on_zoom);
     goxel_add_gesture(GESTURE_DRAG, GESTURE_MMB, on_rotate);
-    goxel_add_gesture(GESTURE_HOVER, 0, on_hover);
 
     goxel_load_recent_files();
 
@@ -478,6 +524,18 @@ static void update_window_title(void)
     sys_set_window_title(buf);
 }
 
+bool goxel_gesture3d(const gesture3d_t *gesture)
+{
+    return gesture3d(gesture, &goxel.gesture3ds_count, goxel.gesture3ds);
+}
+
+// Cleanup the unused 3d gestures.
+static void gesture3ds_iter(void)
+{
+    gesture3d_remove_dead(&goxel.gesture3ds_count, goxel.gesture3ds);
+}
+
+
 KEEPALIVE
 int goxel_iter(const inputs_t *inputs)
 {
@@ -515,14 +573,16 @@ int goxel_iter(const inputs_t *inputs)
 
     // Test: update the viewport before the UI.
     // Note: the inputs Y coordinates are inverted!
-    if (!gui_want_capture_mouse()) {
-        inputs2 = *inputs;
-        for (i = 0; i < (int)ARRAY_SIZE(inputs2.touches); i++) {
-            inputs2.touches[i].pos[1] =
-                inputs->window_size[1] - inputs->touches[i].pos[1];
+    inputs2 = *inputs;
+    for (i = 0; i < (int)ARRAY_SIZE(inputs2.touches); i++) {
+        inputs2.touches[i].pos[1] =
+            inputs->window_size[1] - inputs->touches[i].pos[1];
+        if (gui_want_capture_mouse()) {
+            inputs2.touches[i].pos[0] = NAN;
+            inputs2.touches[i].pos[1] = NAN;
         }
-        goxel_mouse_in_view(goxel.gui.viewport, &inputs2, true);
     }
+    goxel_mouse_in_view(goxel.gui.viewport, &inputs2, true);
 
     if (DEFINED(SOUND) && time - goxel.last_click_time > 0.1) {
         volume_key = volume_get_key(goxel_get_render_volume(goxel.image));
@@ -537,6 +597,7 @@ int goxel_iter(const inputs_t *inputs)
         }
     }
 
+    gesture3ds_iter();
     sound_iter();
     update_window_title();
 
@@ -551,34 +612,34 @@ int goxel_iter(const inputs_t *inputs)
     return goxel.quit ? 1 : 0;
 }
 
-static void set_cursor_hint(cursor_t *curs)
+static void set_cursor_hint(const gesture3d_t *gest)
 {
-    if (!curs->snaped) {
+    if (!gest->snaped) {
         goxel_set_hint_text(NULL);
         return;
     }
     goxel_set_hint_text("[%.0f %.0f %.0f]",
-            curs->pos[0] - 0.5, curs->pos[1] - 0.5, curs->pos[2] - 0.5);
+            gest->pos[0] - 0.5, gest->pos[1] - 0.5, gest->pos[2] - 0.5);
 }
 
 static int on_drag(const gesture_t *gest, void *user)
 {
-    cursor_t *c = &goxel.cursor;
-    if (gest->state == GESTURE_BEGIN)
-        c->flags |= CURSOR_PRESSED;
-    if (gest->state == GESTURE_END)
-        c->flags &= ~CURSOR_PRESSED;
+    int i;
+    gesture3d_t *gest3d;
 
-    c->snaped = goxel_unproject(
-            gest->viewport, gest->pos, c->snap_mask,
-            c->snap_offset, c->pos, c->normal);
-    set_cursor_hint(c);
+    for (i = 0; i < goxel.gesture3ds_count; i++) {
+        gest3d = &goxel.gesture3ds[i];
+        if (gest->state == GESTURE_BEGIN)
+            gest3d->flags |= GESTURE3D_FLAG_PRESSED;
+        if (gest->state == GESTURE_END)
+            gest3d->flags &= ~GESTURE3D_FLAG_PRESSED;
 
-    // Set some default values.  The tools can override them.
-    // XXX: would be better to reset the cursor when we change tool!
-    c->snap_mask = goxel.snap_mask;
-    set_flag(&c->snap_mask, SNAP_ROUNDED, goxel.painter.smoothness == 0);
-    c->snap_offset = 0;
+        gest3d->snaped = goxel_unproject(
+                gest->viewport, gest->pos, gest3d->snap_mask,
+                gest3d->snap_shape, gest3d->snap_offset,
+                gest3d->pos, gest3d->normal);
+        set_cursor_hint(gest3d);
+    }
     return 0;
 }
 
@@ -593,8 +654,8 @@ static int on_drag_rotate(const gesture_t *gest, void *user)
     if (gest->state == GESTURE_BEGIN) {
         snap = goxel_unproject(
             gest->viewport, gest->pos,
-            SNAP_IMAGE_BOX | SNAP_SELECTION_OUT | SNAP_VOLUME, 0,
-            pos, normal);
+            SNAP_IMAGE_BOX | SNAP_SELECTION_OUT | SNAP_VOLUME,
+            NULL, 0, pos, normal);
         if (snap) return 1;
     }
     return on_rotate(gest, user);
@@ -686,17 +747,20 @@ static int on_zoom(const gesture_t *gest, void *user)
 
 static int on_hover(const gesture_t *gest, void *user)
 {
-    cursor_t *c = &goxel.cursor;
-    c->snaped = goxel_unproject(gest->viewport, gest->pos, c->snap_mask,
-                                c->snap_offset, c->pos, c->normal);
-    set_cursor_hint(c);
-    c->flags &= ~CURSOR_PRESSED;
-    // Set some default values.  The tools can override them.
-    // XXX: would be better to reset the cursor when we change tool!
-    c->snap_mask = goxel.snap_mask;
-    set_flag(&c->snap_mask, SNAP_ROUNDED, goxel.painter.smoothness == 0);
-    c->snap_offset = 0;
-    set_flag(&c->flags, CURSOR_OUT, gest->state == GESTURE_END);
+    int i;
+    gesture3d_t *gest3d;
+
+    for (i = 0; i < goxel.gesture3ds_count; i++) {
+        gest3d = &goxel.gesture3ds[i];
+        gest3d->snaped = goxel_unproject(
+                gest->viewport, gest->pos, gest3d->snap_mask,
+                gest3d->snap_shape, gest3d->snap_offset,
+                gest3d->pos, gest3d->normal);
+        set_cursor_hint(gest3d);
+        gest3d->flags &= ~GESTURE3D_FLAG_PRESSED;
+        set_flag(&gest3d->flags, GESTURE3D_FLAG_OUT,
+                 gest->state == GESTURE_END);
+    }
     return 0;
 }
 
@@ -706,16 +770,21 @@ void goxel_mouse_in_view(const float viewport[4], const inputs_t *inputs,
 {
     float p[3], n[3];
     camera_t *camera = get_camera();
+    gesture3d_t *gest3d;
+    int i;
 
     painter_t painter = goxel.painter;
     gesture_update(goxel.gestures_count, goxel.gestures,
                    inputs, viewport, NULL);
-    set_flag(&goxel.cursor.flags, CURSOR_SHIFT, inputs->keys[KEY_LEFT_SHIFT]);
-    set_flag(&goxel.cursor.flags, CURSOR_CTRL, inputs->keys[KEY_CONTROL]);
 
-    // Need to set the cursor snap mask to default because the tool might
-    // change it.
-    goxel.cursor.snap_mask = goxel.snap_mask;
+    for (i = 0; i < goxel.gesture3ds_count; i++) {
+        gest3d = &goxel.gesture3ds[i];
+        set_flag(&gest3d->flags, GESTURE3D_FLAG_SHIFT,
+                 inputs->keys[KEY_LEFT_SHIFT]);
+        set_flag(&gest3d->flags, GESTURE3D_FLAG_CTRL,
+                 inputs->keys[KEY_CONTROL]);
+    }
+
     painter.box = !box_is_null(goxel.image->active_layer->box) ?
                          &goxel.image->active_layer->box :
                          !box_is_null(goxel.image->box) ?
@@ -1351,6 +1420,42 @@ void goxel_add_recent_file(const char *path)
         fprintf(file, "%s\n", goxel.recent_files[i]);
     }
     fclose(file);
+}
+
+void goxel_apply_color_filter(
+        void (*fn)(void *args, uint8_t color[4]), void *args)
+{
+    layer_t *layer = goxel.image->active_layer;
+    volume_t *volume;
+    volume_iterator_t iter;
+    int p[3];
+    uint8_t color[4];
+    painter_t painter;
+
+    /* Compute the volume where we want to apply the filter.  Mask, rect
+     * selection, or the whole layer.  */
+    volume = volume_copy(layer->volume);
+    if (!volume_is_empty(goxel.mask)) {
+        volume_merge(volume, goxel.mask, MODE_INTERSECT, NULL);
+    } else if (!box_is_null(goxel.selection)) {
+        painter = (painter_t) {
+            .shape = &shape_cube,
+            .mode = MODE_INTERSECT,
+            .color = {255, 255, 255, 255},
+        };
+        volume_op(volume, &painter, goxel.selection);
+    }
+    iter = volume_get_iterator(volume,
+            VOLUME_ITER_VOXELS | VOLUME_ITER_SKIP_EMPTY);
+    while (volume_iter(&iter, p)) {
+        volume_get_at(volume, &iter, p, color);
+        fn(args, color);
+        volume_set_at(volume, &iter, p, color);
+    }
+
+    // Merge back into the original layer.
+    volume_merge(layer->volume, volume, MODE_OVER, NULL);
+    volume_delete(volume);
 }
 
 static void a_cut_as_new_layer(void)

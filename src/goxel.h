@@ -395,6 +395,7 @@ enum {
     X(ICON_CLOUD,                   1, 4, 0),
     X(ICON_SHAPE,                   2, 4, 0),
     X(ICON_CLOSE,                   3, 4, 0),
+    X(ICON_THREE_DOTS,              4, 4, 0),
 
     X(ICON_TOOLS,                   0, 5, THEME_GROUP_ICON_EDIT),
     X(ICON_PALETTE,                 1, 5, THEME_GROUP_ICON_EDIT),
@@ -434,9 +435,10 @@ enum {
     SNAP_SELECTION_IN   = 1 << 1,
     SNAP_SELECTION_OUT  = 1 << 2,
     SNAP_VOLUME         = 1 << 3,
-    SNAP_PLANE          = 1 << 4,
+    SNAP_PLANE          = 1 << 4, // The global plane.
     SNAP_CAMERA         = 1 << 5, // Used for laser tool.
-    SNAP_LAYER_OUT      = 1 << 6, // Snap the layer box.
+    SNAP_SHAPE_BOX      = 1 << 6, // Snap to custom box.
+    SNAP_SHAPE_PLANE    = 1 << 7, // Snap to custom plane.
 
     SNAP_ROUNDED        = 1 << 8, // Round the result.
 };
@@ -486,14 +488,11 @@ typedef struct goxel
     painter_t  painter;
     renderer_t rend;
 
-    cursor_t   cursor;
-
     tool_t     *tool;
     float      tool_radius;
     bool       pathtrace; // Render pathtraced mode.
 
     // Some state for the tool iter functions.
-    float      tool_plane[4][4];
     int        tool_drag_mode; // 0: move, 1: resize.
 
     float      selection[4][4];   // The selection box.
@@ -523,6 +522,10 @@ typedef struct goxel
     // All the gestures we listen to.  Up to 16.
     gesture_t *gestures[16];
     int gestures_count;
+
+    // All the 3d gestures we listen to.
+    gesture3d_t gesture3ds[32];
+    int gesture3ds_count;
 
     pathtracer_t pathtracer;
 
@@ -575,7 +578,9 @@ void goxel_release_graphics(void);
 void goxel_on_low_memory(void);
 
 int goxel_unproject(const float viewport[4],
-                    const float pos[2], int snap_mask, float offset,
+                    const float pos[2], int snap_mask,
+                    const float snap_shape[4][4],
+                    float offset,
                     float out[3], float normal[3]);
 
 void goxel_render_view(const float viewport[4], bool render_mode);
@@ -632,24 +637,40 @@ int gox_iter_infos(const char *path,
  * Render a box that can be edited with the mouse.
  *
  * This is used for the move and selection tools.
- * Still a bit experimental.  In theory we should be able to edit any box,
- * but because of the snap mechanism, we can only edit the layer or selection
- * for the moment.
+ * Still a bit experimental.
  *
  * Parameters:
- *   snap   - SNAP_LAYER_OUT for layer edit, SNAP_SELECTION_OUT for selection
- *            edit.
+ *   box    - The box we want to edit.
  *   mode   - 0: move, 1: resize.
  *   transf - Receive the output transformation.
  *   first  - Set to true if the edit is the first one.
  */
-int box_edit(int snap, int mode, float transf[4][4], bool *first);
+int box_edit(const float box[4][4], int mode, float transf[4][4],
+             bool *first);
 
 
 void settings_load(void);
 void settings_save(void);
 
 void goxel_add_recent_file(const char *path);
+
+/*
+ * goxel_apply_color_filter
+ * Apply a color filter to all the current selected voxels.
+ *
+ * This is a conveniance function so that we don't have to handle the case
+ * where we have a selection mask or not.
+ */
+void goxel_apply_color_filter(
+        void (*fn)(void *args, uint8_t color[4]), void *args);
+
+/*
+ * Process a 3d gesture.
+ *
+ * Used by the tools to react to 3d gesture.
+ * Should be called once per frame for each gesture we are listening to.
+ */
+bool goxel_gesture3d(const gesture3d_t *gesture);
 
 // Section: tests
 

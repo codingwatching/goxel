@@ -24,12 +24,6 @@ typedef struct {
     volume_t *volume_orig; // Original volume.
     volume_t *volume;      // Volume containing only the tool path.
     float start_pos[3];
-
-    struct {
-        gesture3d_t drag;
-        gesture3d_t hover;
-    } gestures;
-
 } tool_line_t;
 
 // XXX: same as in brush.c.
@@ -81,34 +75,33 @@ static void get_box(const float p0[3], const float p1[3], const float n[3],
     mat4_copy(box, out);
 }
 
-static int on_drag(gesture3d_t *gest, void *user)
+static int on_drag(gesture3d_t *gest)
 {
-    tool_line_t *tool = USER_GET(user, 0);
+    tool_line_t *tool = USER_GET(gest->user, 0);
     painter_t painter;
     const float radius = goxel.tool_radius;
-    cursor_t *curs = gest->cursor;
     float box[4][4];
 
-    if (gest->state == GESTURE_BEGIN) {
-        vec3_copy(curs->pos, tool->start_pos);
+    if (gest->state == GESTURE3D_STATE_BEGIN) {
+        vec3_copy(gest->pos, tool->start_pos);
         assert(tool->volume_orig);
         volume_set(tool->volume_orig, goxel.image->active_layer->volume);
         image_history_push(goxel.image);
     }
 
-    painter = *(painter_t*)USER_GET(user, 1);
+    painter = *(painter_t*)USER_GET(gest->user, 1);
     painter.mode = MODE_MAX;
     vec4_set(painter.color, 255, 255, 255, 255);
-    get_box(tool->start_pos, curs->pos, curs->normal, radius, NULL, box);
+    get_box(tool->start_pos, gest->pos, gest->normal, radius, NULL, box);
     volume_clear(tool->volume);
     volume_op(tool->volume, &painter, box);
 
-    painter = *(painter_t*)USER_GET(user, 1);
+    painter = *(painter_t*)USER_GET(gest->user, 1);
     if (!goxel.tool_volume) goxel.tool_volume = volume_new();
     volume_set(goxel.tool_volume, tool->volume_orig);
     volume_merge(goxel.tool_volume, tool->volume, painter.mode, painter.color);
 
-    if (gest->state == GESTURE_END) {
+    if (gest->state == GESTURE3D_STATE_END) {
         volume_set(goxel.image->active_layer->volume, goxel.tool_volume);
         volume_set(tool->volume_orig, goxel.tool_volume);
         volume_delete(goxel.tool_volume);
@@ -118,20 +111,19 @@ static int on_drag(gesture3d_t *gest, void *user)
     return 0;
 }
 
-static int on_hover(gesture3d_t *gest, void *user)
+static int on_hover(gesture3d_t *gest)
 {
     volume_t *volume = goxel.image->active_layer->volume;
 
-    const painter_t *painter = USER_GET(user, 1);
-    cursor_t *curs = gest->cursor;
+    const painter_t *painter = USER_GET(gest->user, 1);
     float box[4][4];
 
-    if (gest->state == GESTURE_END) {
+    if (gest->state == GESTURE3D_STATE_END) {
         volume_delete(goxel.tool_volume);
         goxel.tool_volume = NULL;
         return 0;
     }
-    get_box(curs->pos, NULL, curs->normal, goxel.tool_radius, NULL, box);
+    get_box(gest->pos, NULL, gest->normal, goxel.tool_radius, NULL, box);
 
     if (!goxel.tool_volume) goxel.tool_volume = volume_new();
     volume_set(goxel.tool_volume, volume);
@@ -143,32 +135,31 @@ static int iter(tool_t *tool_, const painter_t *painter,
                 const float viewport[4])
 {
     tool_line_t *tool = (void*)tool_;
-    cursor_t *curs = &goxel.cursor;
-    // XXX: for the moment we force rounded positions for the brush tool
-    // to make things easier.
-    curs->snap_mask |= SNAP_ROUNDED;
+    float snap_offset;
 
     if (!tool->volume_orig)
         tool->volume_orig = volume_copy(goxel.image->active_layer->volume);
     if (!tool->volume)
         tool->volume = volume_new();
 
-    if (!tool->gestures.drag.type) {
-        tool->gestures.drag = (gesture3d_t) {
-            .type = GESTURE_DRAG,
-            .callback = on_drag,
-        };
-        tool->gestures.hover = (gesture3d_t) {
-            .type = GESTURE_HOVER,
-            .callback = on_hover,
-        };
-    }
-
-    curs->snap_offset = goxel.snap_offset * goxel.tool_radius +
+    snap_offset = goxel.snap_offset * goxel.tool_radius +
         ((painter->mode == MODE_OVER) ? 0.5 : -0.5);
 
-    gesture3d(&tool->gestures.hover, curs, USER_PASS(tool, painter));
-    gesture3d(&tool->gestures.drag, curs, USER_PASS(tool, painter));
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_DRAG,
+        .snap_mask = goxel.snap_mask | SNAP_ROUNDED,
+        .snap_offset = snap_offset,
+        .callback = on_drag,
+        .user = USER_PASS(tool, painter),
+    });
+    goxel_gesture3d(&(gesture3d_t) {
+        .type = GESTURE3D_TYPE_HOVER,
+        .snap_mask = goxel.snap_mask | SNAP_ROUNDED,
+        .snap_offset = snap_offset,
+        .callback = on_hover,
+        .user = USER_PASS(tool, painter),
+    });
+
     return 0;
 }
 
